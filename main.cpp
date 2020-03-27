@@ -3,6 +3,10 @@
 #include <Windows.h>
 #include <Shlwapi.h>
 
+extern "C" void *__enclave_config = 0;
+
+typedef void (*Callback) (const char *, void *);
+
 struct Config
 {
     char logPath [500];
@@ -117,11 +121,103 @@ char *loadFile (Config& config, size_t& size)
     return buffer;
 }
 
+char *getNextLine (char *curPos, char *buffer, const size_t size)
+{
+    memset (buffer, 0, size);
+
+    for (size_t count = 0; count < size; ++ curPos, ++ buffer, ++ count)
+    {
+        switch (*curPos)
+        {
+            case '\0':
+                return curPos;
+
+            case '\n':
+                return curPos + 1;
+
+            case '\r':
+                break;
+
+            default:
+                *buffer = *curPos;
+        }
+    }
+
+    return 0;
+}
+
+size_t countLines (const char *buffer)
+{
+    size_t count = 1;
+
+    for (const char *chr = buffer; *chr; ++ chr)
+    {
+        if (*chr == '\n')
+            ++ count;
+    }
+
+    return count;
+}
+
+void processLine (const char *line, void *param)
+{
+    unsigned long bytesWritten;
+    HANDLE port = (HANDLE) param;
+
+    WriteFile (port, line, strlen (line), & bytesWritten, 0);
+//printf("%s\n",line);    
+}
+
+void processFile (Config& config, char *buffer, Callback cb, void *param)
+{
+    char line [200];
+    size_t numberOfLines = countLines (buffer);
+
+    do
+    {
+        size_t count = 1;
+
+        for (char *curLine = buffer; *curLine; curLine = getNextLine (curLine, line, sizeof (line)))
+        {
+            printf ("Line %zd of %zd\r", count ++, numberOfLines);
+
+            strcat (line, "\r\n");
+            cb (line, param);
+
+            Sleep (config.pause);
+        }
+    }
+    while (!config.once);
+    
+}
+
+HANDLE openPort (Config& config)
+{
+    HANDLE port;
+    char portUnc [100];
+
+    sprintf (portUnc, "\\\\.\\COM%d", config.port);
+
+    port = CreateFile (portUnc, GENERIC_READ | GENERIC_WRITE, 0, 0, CREATE_ALWAYS, 0, 0);
+
+    if (port != INVALID_HANDLE_VALUE)
+    {
+        DCB dcb;
+
+        GetCommState (port, & dcb);
+
+        dcb.BaudRate = config.baud;
+
+        SetCommState (port, & dcb);
+    }
+
+    return port;
+}
+
 int main (int argCount, char *args [])
 {
     Config config;
     char  *buffer;
-    HANDLE port;
     size_t size;
 
     printf ("Serial Log Player\nCopyright (c) by jecat\n");
@@ -142,6 +238,18 @@ int main (int argCount, char *args [])
 
     if (buffer)
     {
+        HANDLE port = openPort (config);
+
+        if (port != INVALID_HANDLE_VALUE)
+        {
+            processFile (config, buffer, processLine, port);
+            CloseHandle (port);
+        }
+        else
+        {
+            printf ("Unable to open COM%d, error %d\n", config.port, GetLastError ());
+        }
+
         free (buffer);
     }
 
