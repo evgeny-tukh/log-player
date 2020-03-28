@@ -5,28 +5,36 @@
 
 extern "C" void *__enclave_config = 0;
 
-typedef void (*Callback) (const char *, void *);
-
 struct Config
 {
     char logPath [500];
     unsigned int port;
     unsigned int baud;
-    bool once;
+    bool once, verbose;
     unsigned int pause;
+    unsigned int start, end;
 
-    Config () : port (1), baud (4800), once (false), pause (100)
+    Config () : port (1), baud (4800), once (false), verbose (false), pause (100), start (0), end (0xffffffff)
     {
         memset (logPath, 0, sizeof (logPath));
     }
 };
+
+typedef void (*Callback) (Config& config, const char *, void *);
 
 bool checkArguments (int argCount, char *args [], Config& config)
 {
     bool result = argCount > 0;
 
     if (result)
-        strcpy (config.logPath, args [1]);
+    {
+        const char *arg = args [1];
+
+        if ((arg [0] == '/' || arg [0] == '-') && (arg [1] == '?' || arg [1] == 'h' || arg [1] == 'H'))
+            return false;
+
+        strcpy (config.logPath, arg);
+    }
 
     for (int i = 2; result && i < argCount; ++ i)
     {
@@ -36,6 +44,22 @@ bool checkArguments (int argCount, char *args [], Config& config)
         {
             switch (toupper (arg [1]))
             {
+                case 'S':
+                    if (arg [2] == ':')
+                        config.start = atoi (arg + 3);
+                    else
+                        result = false;
+                    
+                    break;
+
+                case 'E':
+                    if (arg [2] == ':')
+                        config.end = atoi (arg + 3);
+                    else
+                        result = false;
+                    
+                    break;
+
                 case 'P':
                     if (arg [2] == ':')
                         config.port = atoi (arg + 3);
@@ -62,6 +86,9 @@ bool checkArguments (int argCount, char *args [], Config& config)
 
                 case 'O':
                     config.once = true; break;
+
+                case 'V':
+                    config.verbose = true; break;
             }
         }
         else
@@ -75,12 +102,16 @@ bool checkArguments (int argCount, char *args [], Config& config)
 
 void showHelp ()
 {
-    printf  ("lp [options] logfile\n\n"
+    printf  ("\nlp [options] logfile\n\n"
              "Options are:\n"
              "\t-p:port\n"
              "\t-b:baud\n"
-             "\t-p:pause_ms\n"
-             "\t-o[nce]\n");
+             "\t-p:pause (ms)\n"
+             "\t-s:start line (one-based)\n"
+             "\t-e:end line (one-based)\n"
+             "\t-v[erbose]\n"
+             "\t-o[nce]\n\n"
+             "lp [-?|-h] for help\n\n");
 }
 
 char *loadFile (Config& config, size_t& size)
@@ -159,30 +190,38 @@ size_t countLines (const char *buffer)
     return count;
 }
 
-void processLine (const char *line, void *param)
+void processLine (Config& config, const char *line, void *param)
 {
     unsigned long bytesWritten;
     HANDLE port = (HANDLE) param;
 
     WriteFile (port, line, strlen (line), & bytesWritten, 0);
-//printf("%s\n",line);    
+
+    if (config.verbose)
+        printf ("\n%s\n", line);
 }
 
 void processFile (Config& config, char *buffer, Callback cb, void *param)
 {
     char line [200];
     size_t numberOfLines = countLines (buffer);
+    char *start = buffer;
+
+    for (unsigned int i = 1; *start && i < config.start; ++ i)
+        start = getNextLine (start, line, sizeof (line));
 
     do
     {
-        size_t count = 1;
+        size_t count = config.start;
 
-        for (char *curLine = buffer; *curLine; curLine = getNextLine (curLine, line, sizeof (line)))
+        for (char *curLine = start, *nextLine = getNextLine (curLine, line, sizeof (line));
+             *curLine && count <= config.end;
+             curLine = nextLine, nextLine = curLine ? getNextLine (curLine, line, sizeof (line)) : 0)
         {
             printf ("Line %zd of %zd\r", count ++, numberOfLines);
 
             strcat (line, "\r\n");
-            cb (line, param);
+            cb (config, line, param);
 
             Sleep (config.pause);
         }
